@@ -57,6 +57,7 @@
 <script>
 (() => {
   const RAMP = ".,-~:;=!*#$@";
+  const HIT_URL = "https://heart.pureputthipong.workers.dev";
   const cv = document.getElementById("stage");
   const ctx = cv.getContext("2d");
   const hint = document.getElementById("hint");
@@ -226,7 +227,8 @@
   let clock = 0;
   function fire() {
     if (mode !== "orbit" && mode !== "enter") return;
-    // ตรงนี้คือจุดที่จะส่งแจ้งเตือนเข้า Discord ทุกครั้งที่มีคนกด (ต้องมีหลังบ้านก่อน ยังไม่ได้ทำ)
+    // แจ้ง Pure ผ่าน Worker (ลิงก์ Discord อยู่ใน Worker ไม่อยู่ในหน้านี้) · บน claude.ai จะโดนบล็อก ไม่เป็นไร
+    try { navigator.sendBeacon(HIT_URL); } catch (e) { /* ส่งไม่ได้ก็ยิงศรต่อตามปกติ */ }
     mode = "aim"; t0 = clock;
     from = { P: cur.P, a: cur.a, k: cur.k };
     hint.classList.add("gone");
