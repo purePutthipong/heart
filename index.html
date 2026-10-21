@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>html,body{margin:0}</style>
+<title>หัวใจกับศร</title>
+<style>
+  /* ผืนมืดหน้าเดียว (ตั้งใจเป็นโทนเดียว ไม่สลับธีม) · หัวใจ ASCII กลางจอ · สีแค่ 3: แดง / ทอง / ขาวอมชมพูตรงจุดสะท้อน */
+  :root {
+    --bg: #0c090d;
+    --heart: #e5435f;
+    --arrow: #e9b64c;
+    --shine: #fbe3e8;
+    --muted: #8a6570;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", "Noto Sans Thai", "Leelawadee UI", sans-serif;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--shine);
+    overflow: hidden;
+    box-sizing: border-box;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    display: flex;
+    flex-direction: column;
+  }
+  #stage {
+    flex: 1;
+    width: 100%;
+    min-height: 0;
+    display: block;
+    cursor: pointer;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #stage:focus-visible { outline: 1px dashed var(--muted); outline-offset: -6px; }
+  #hint {
+    margin: 0;
+    padding-block: 10px 18px;
+    text-align: center;
+    font: 13px/1.4 var(--sans);
+    letter-spacing: 0.02em;
+    color: var(--muted);
+    transition: opacity 1.2s ease;
+  }
+  #hint.gone { opacity: 0; }
+</style>
+</head>
+<body>
+<canvas id="stage" tabindex="0" role="button" aria-label="หัวใจหมุนอยู่ มีศรโคจรรอบ แตะเพื่อยิงศร"></canvas>
+<p id="hint">แตะที่ไหนก็ได้ เพื่อยิงศร</p>
+
+<script>
+(() => {
+  const RAMP = ".,-~:;=!*#$@";
+  const cv = document.getElementById("stage");
+  const ctx = cv.getContext("2d");
+  const hint = document.getElementById("hint");
+  const css = getComputedStyle(document.documentElement);
+  const tok = (n) => css.getPropertyValue(n).trim();
+  const COL = { bg: tok("--bg"), heart: tok("--heart"), arrow: tok("--arrow"), shine: tok("--shine") };
+  const MONO = tok("--mono");
+  const REDUCE = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // ---------- เวกเตอร์ / เมทริกซ์ 3x3 (row-major)
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const norm = (v) => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; };
+  const scale3 = (v, k) => [v[0] * k, v[1] * k, v[2] * k];
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const lerp3 = (a, b, t) => [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
+  const ease = (t) => (t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t));
+  const rotX = (r) => { const c = Math.cos(r), s = Math.sin(r); return [1, 0, 0, 0, c, -s, 0, s, c]; };
+  const rotY = (r) => { const c = Math.cos(r), s = Math.sin(r); return [c, 0, s, 0, 1, 0, -s, 0, c]; };
+  const rotZ = (r) => { const c = Math.cos(r), s = Math.sin(r); return [c, -s, 0, s, c, 0, 0, 0, 1]; };
+  const mul = (A, B) => {
+    const C = new Array(9);
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++)
+      C[i * 3 + j] = A[i * 3] * B[j] + A[i * 3 + 1] * B[3 + j] + A[i * 3 + 2] * B[6 + j];
+    return C;
+  };
+  const app = (M, v) => [
+    M[0] * v[0] + M[1] * v[1] + M[2] * v[2],
+    M[3] * v[0] + M[4] * v[1] + M[5] * v[2],
+    M[6] * v[0] + M[7] * v[1] + M[8] * v[2],
+  ];
+  const transpose = (M) => [M[0], M[3], M[6], M[1], M[4], M[7], M[2], M[5], M[8]];
+  function slerp(a, b, t) {
+    let d = Math.max(-1, Math.min(1, dot(a, b)));
+    if (d > 0.9995) return norm(lerp3(a, b, t));
+    if (d < -0.995) { b = norm([b[0] + 0.05, b[1] + 0.1, b[2]]); d = dot(a, b); }
+    const th = Math.acos(d), s = Math.sin(th);
+    const w1 = Math.sin((1 - t) * th) / s, w2 = Math.sin(t * th) / s;
+    return [a[0] * w1 + b[0] * w2, a[1] * w1 + b[1] * w2, a[2] * w1 + b[2] * w2];
+  }
+
+  // ---------- หัวใจ: เส้นรูปหัวใจ หมุนรอบความหนา (u = ความลึก, v = รอบขอบ)
+  const NU = 140, NV = 360;
+  const heartAt = (u, v) => {
+    const su = Math.sin(u);
+    return [
+      su * (15 * Math.sin(v) - 4 * Math.sin(3 * v)),
+      su * (15 * Math.cos(v) - 5 * Math.cos(2 * v) - 2 * Math.cos(3 * v) - Math.cos(4 * v)),
+      8 * Math.cos(u),
+    ];
+  };
+  const HP = new Float32Array(NU * NV * 3);
+  const HN = new Float32Array(NU * NV * 3);
+  {
+    const e = 1e-3;
+    const diff = (p, q) => [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
+    const h = Math.PI / 2;
+    const probe = cross(diff(heartAt(h + e, h), heartAt(h - e, h)), diff(heartAt(h, h + e), heartAt(h, h - e)));
+    const sign = probe[0] >= 0 ? 1 : -1; // จุดขวาสุดต้องมี normal ชี้ +x (ชี้ออกนอก)
+    let ymin = Infinity, ymax = -Infinity;
+    for (let i = 0; i < NU; i++) {
+      const u = ((i + 0.5) / NU) * Math.PI;
+      for (let k = 0; k < NV; k++) {
+        const v = (k / NV) * Math.PI * 2;
+        const p = heartAt(u, v);
+        const du = heartAt(u + e, v).map((x, j) => x - heartAt(u - e, v)[j]);
+        const dv = heartAt(u, v + e).map((x, j) => x - heartAt(u, v - e)[j]);
+        const n = norm(scale3(cross(du, dv), sign));
+        const j = (i * NV + k) * 3;
+        HP[j] = p[0]; HP[j + 1] = p[1]; HP[j + 2] = p[2];
+        HN[j] = n[0]; HN[j + 1] = n[1]; HN[j + 2] = n[2];
+        if (p[1] < ymin) ymin = p[1];
+        if (p[1] > ymax) ymax = p[1];
+      }
+    }
+    const yc = (ymin + ymax) / 2;
+    for (let j = 1; j < HP.length; j += 3) HP[j] -= yc;
+  }
+
+  // ---------- ศร (แกนตามยาว s: หาง -24 → ปลาย +24) · [s, q1, q2, ns, n1, n2, ครีบ]
+  const AP = [];
+  {
+    const R0 = 0.7, HL = 8, HR = 2.2, ca = Math.atan2(HR, HL);
+    for (let i = 0; i <= 160; i++) {
+      const s = -24 + (40 * i) / 160;
+      for (let k = 0; k < 12; k++) {
+        const ph = (k / 12) * Math.PI * 2, c = Math.cos(ph), sn = Math.sin(ph);
+        AP.push(s, R0 * c, R0 * sn, 0, c, sn, 0);
+      }
+    }
+    for (let i = 0; i <= 48; i++) {
+      const t = i / 48, s = 16 + HL * t, r = HR * (1 - t);
+      const nk = Math.max(6, Math.round(28 * (1 - t)));
+      for (let k = 0; k < nk; k++) {
+        const ph = (k / nk) * Math.PI * 2, c = Math.cos(ph), sn = Math.sin(ph);
+        AP.push(s, r * c, r * sn, Math.sin(ca), Math.cos(ca) * c, Math.cos(ca) * sn, 0);
+      }
+    }
+    for (let i = 0; i <= 8; i++) {
+      const r = R0 + ((HR - R0) * i) / 8;
+      for (let k = 0; k < 24; k++) {
+        const ph = (k / 24) * Math.PI * 2;
+        AP.push(16, r * Math.cos(ph), r * Math.sin(ph), -1, 0, 0, 0);
+      }
+    }
+    for (let f = 0; f < 4; f++) {
+      const ph = Math.PI / 4 + (f * Math.PI) / 2, c = Math.cos(ph), sn = Math.sin(ph);
+      for (let i = 0; i <= 36; i++) {
+        const s = -24 + (10 * i) / 36;
+        const rout = s < -19 ? 3.2 : lerp(3.2, R0, (s + 19) / 5);
+        for (let j = 0; j <= 10; j++) {
+          const r = R0 + ((rout - R0) * j) / 10;
+          AP.push(s, r * c, r * sn, 0, -sn, c, 1);
+        }
+      }
+    }
+  }
+  const APF = new Float32Array(AP);
+
+  // ---------- ฉาก
+  const L = norm([-0.55, 0.65, 0.55]); // แสงจากบนซ้ายด้านหน้า
+  const DCAM = 150;
+  const TILT = 0.12;
+  const SPIN_PERIOD = REDUCE ? 40 : 9;
+  const ORBIT_PERIOD = REDUCE ? 20 : 5.5;
+  const ORBIT_R = 25;
+  const ORBIT_K = 0.4; // ศรตอนโคจรตัวเล็กลง แบบดวงจันทร์
+  const RING = mul(rotZ(-0.32), rotX(0.36));
+  const D_HIT = norm([1, 1, 0.28]); // แทงขึ้นไปทางบนขวา
+  const LAUNCH = scale3(D_HIT, -46);
+  const STUCK = scale3(D_HIT, 4);
+
+  let W = 0, H = 0, cw = 0, ch = 0, cols = 0, rows = 0, S = 1, cx = 0, cy = 0, fs = 10;
+  let zH, lH, zA, lA;
+
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = cv.clientWidth; H = cv.clientHeight;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    fs = Math.max(6, Math.min(13, Math.min(W, H) / 88));
+    ctx.font = `${fs}px ${MONO}`;
+    cw = ctx.measureText("M").width || fs * 0.6;
+    ch = fs * 1.02;
+    cols = Math.max(1, Math.floor(W / cw));
+    rows = Math.max(1, Math.floor(H / ch));
+    S = Math.min(W / (2 * 35), H / (2 * 30));
+    cx = W / 2; cy = H / 2;
+    const n = cols * rows;
+    zH = new Float32Array(n); lH = new Float32Array(n);
+    zA = new Float32Array(n); lA = new Float32Array(n);
+  }
+
+  // ---------- สถานะศร
+  let mode = "enter", t0 = 0, from = null, stuckP = null, stuckA = null, pulseT = -10;
+  let cur = { P: [0, 0, 0], a: [1, 0, 0], k: ORBIT_K, alpha: 0 };
+
+  function heartM(now) { return mul(rotX(TILT), rotY((now / SPIN_PERIOD) * Math.PI * 2)); }
+  function orbitPose(now) {
+    const th = (now / ORBIT_PERIOD) * Math.PI * 2;
+    return {
+      P: app(RING, [ORBIT_R * Math.cos(th), 0, ORBIT_R * Math.sin(th)]),
+      a: norm(app(RING, [-Math.sin(th), 0, Math.cos(th)])),
+    };
+  }
+
+  let clock = 0;
+  function fire() {
+    if (mode !== "orbit" && mode !== "enter") return;
+    // ตรงนี้คือจุดที่จะส่งแจ้งเตือนเข้า Discord ทุกครั้งที่มีคนกด (ต้องมีหลังบ้านก่อน ยังไม่ได้ทำ)
+    mode = "aim"; t0 = clock;
+    from = { P: cur.P, a: cur.a, k: cur.k };
+    hint.classList.add("gone");
+  }
+
+  function updateArrow(now, M) {
+    const dt = now - t0;
+    if (mode === "enter" || mode === "orbit") {
+      const o = orbitPose(now);
+      const alpha = mode === "enter" ? ease(dt / 0.8) : 1;
+      if (mode === "enter" && dt >= 0.8) mode = "orbit";
+      cur = { P: o.P, a: o.a, k: ORBIT_K, alpha };
+    } else if (mode === "aim") {
+      const u = ease(dt / 0.5);
+      cur = { P: lerp3(from.P, LAUNCH, u), a: norm(slerp(from.a, D_HIT, u)), k: lerp(from.k, 1, u), alpha: 1 };
+      if (dt >= 0.5) { mode = "fly"; t0 = now; }
+    } else if (mode === "fly") {
+      const u = Math.min(1, dt / 0.2);
+      cur = { P: lerp3(LAUNCH, STUCK, u * u), a: D_HIT, k: 1, alpha: 1 };
+      if (dt >= 0.2) {
+        const inv = transpose(M);
+        stuckP = app(inv, STUCK); stuckA = app(inv, D_HIT);
+        pulseT = now; mode = "stuck"; t0 = now;
+      }
+    } else {
+      const alpha = mode === "fade" ? 1 - ease(dt / 0.9) : 1;
+      cur = { P: app(M, stuckP), a: norm(app(M, stuckA)), k: 1, alpha };
+      if (mode === "stuck" && dt >= 2.6) { mode = "fade"; t0 = now; }
+      else if (mode === "fade" && dt >= 0.9) { mode = "enter"; t0 = now; }
+    }
+  }
+
+  function shade(nx, ny, nz, twoSided) {
+    let ndl = nx * L[0] + ny * L[1] + nz * L[2];
+    if (twoSided && ndl < 0) { ndl = -ndl; nx = -nx; ny = -ny; nz = -nz; }
+    const rv = 2 * ndl * nz - L[2];
+    return 0.1 + 0.72 * Math.max(0, ndl) + (rv > 0 && ndl > 0 ? 0.5 * Math.pow(rv, 16) : 0);
+  }
+
+  function plot(x, y, z, zb, lb, lum) {
+    const w = DCAM / (DCAM - z);
+    const px = cx + x * S * w, py = cy - y * S * w;
+    if (px < 0 || py < 0) return;
+    const col = (px / cw) | 0, row = (py / ch) | 0;
+    if (col >= cols || row >= rows) return;
+    const k = row * cols + col;
+    if (w <= zb[k]) return;
+    zb[k] = w; lb[k] = lum;
+  }
+
+  function renderHeart(M, sc) {
+    const [m0, m1, m2, m3, m4, m5, m6, m7, m8] = M;
+    for (let j = 0; j < HP.length; j += 3) {
+      const hx = HN[j], hy = HN[j + 1], hz = HN[j + 2];
+      const nz = m6 * hx + m7 * hy + m8 * hz;
+      if (nz < -0.3) continue; // หันหลังให้กล้องชัดๆ ข้ามได้ (z-buffer จะบังอยู่แล้ว)
+      const nx = m0 * hx + m1 * hy + m2 * hz, ny = m3 * hx + m4 * hy + m5 * hz;
+      const px = HP[j] * sc, py = HP[j + 1] * sc, pz = HP[j + 2] * sc;
+      plot(m0 * px + m1 * py + m2 * pz, m3 * px + m4 * py + m5 * pz, m6 * px + m7 * py + m8 * pz, zH, lH, shade(nx, ny, nz, false));
+    }
+  }
+
+  function renderArrow() {
+    if (cur.alpha <= 0.01) return;
+    const a = cur.a, k = cur.k, P = cur.P;
+    let b = cross(a, [0, 1, 0]);
+    if (Math.hypot(b[0], b[1], b[2]) < 1e-3) b = cross(a, [1, 0, 0]);
+    b = norm(b);
+    const c = cross(b, a);
+    for (let j = 0; j < APF.length; j += 7) {
+      const s = APF[j] * k, q1 = APF[j + 1] * k, q2 = APF[j + 2] * k;
+      const ns = APF[j + 3], n1 = APF[j + 4], n2 = APF[j + 5];
+      const x = P[0] + a[0] * s + b[0] * q1 + c[0] * q2;
+      const y = P[1] + a[1] * s + b[1] * q1 + c[1] * q2;
+      const z = P[2] + a[2] * s + b[2] * q1 + c[2] * q2;
+      const nx = a[0] * ns + b[0] * n1 + c[0] * n2;
+      const ny = a[1] * ns + b[1] * n1 + c[1] * n2;
+      const nz = a[2] * ns + b[2] * n1 + c[2] * n2;
+      plot(x, y, z, zA, lA, shade(nx, ny, nz, APF[j + 6] === 1));
+    }
+  }
+
+  const ch12 = (lum) => RAMP[Math.max(0, Math.min(11, (lum * 12) | 0))];
+
+  function draw() {
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = COL.bg;
+    ctx.fillRect(0, 0, W, H);
+    ctx.font = `${fs}px ${MONO}`;
+    ctx.textBaseline = "top";
+    const aAlpha = cur.alpha;
+    const n = cols * rows;
+    // ชั้น 1: หัวใจ (ถ้าศรบังอยู่และกำลังจาง ให้หัวใจค่อยๆ โผล่กลับมา)
+    for (const pass of [0, 1]) {
+      ctx.fillStyle = pass === 0 ? COL.heart : COL.shine;
+      for (let k = 0; k < n; k++) {
+        const lum = lH[k];
+        if (lum <= 0) continue;
+        if ((lum > 0.95) !== (pass === 1)) continue;
+        const arrowWins = lA[k] > 0 && zA[k] > zH[k];
+        const f = arrowWins ? 1 - aAlpha : 1;
+        if (f <= 0.01) continue;
+        ctx.globalAlpha = f * (0.5 + 0.5 * Math.min(1, lum));
+        ctx.fillText(ch12(lum), (k % cols) * cw, ((k / cols) | 0) * ch);
+      }
+    }
+    // ชั้น 2: ศร
+    ctx.fillStyle = COL.arrow;
+    for (let k = 0; k < n; k++) {
+      const lum = lA[k];
+      if (lum <= 0 || zA[k] <= zH[k]) continue;
+      ctx.globalAlpha = aAlpha * (0.4 + 0.6 * Math.min(1, lum));
+      ctx.fillText(ch12(lum), (k % cols) * cw, ((k / cols) | 0) * ch);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  let last = -1;
+  function frame(ts) {
+    requestAnimationFrame(frame);
+    if (ts - last < 32) return; // ~30 เฟรม/วินาที
+    last = ts;
+    const now = ts / 1000;
+    clock = now;
+    if (mode === "enter" && t0 === 0) t0 = now;
+    zH.fill(0); lH.fill(0); zA.fill(0); lA.fill(0);
+    const M = heartM(now);
+    const tp = now - pulseT;
+    const sc = 1 + (tp >= 0 ? 0.07 * Math.exp(-tp * 7) + (tp > 0.28 ? 0.04 * Math.exp(-(tp - 0.28) * 7) : 0) : 0);
+    updateArrow(now, M);
+    renderHeart(M, sc);
+    renderArrow();
+    draw();
+  }
+
+  new ResizeObserver(resize).observe(cv);
+  resize();
+  cv.addEventListener("pointerdown", fire);
+  cv.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fire(); }
+  });
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
